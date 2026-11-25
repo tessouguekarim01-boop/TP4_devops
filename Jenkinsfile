@@ -2,6 +2,11 @@
 pipeline {
     agent any
 
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+    }
+
     environment {
         CLIENT_IMAGE = 'mern-client'
         SERVER_IMAGE = 'mern-server'
@@ -11,14 +16,13 @@ pipeline {
 
     stages {
 
-        // 1. CHECKOUT
         stage('Checkout') {
             steps {
+                deleteDir()
                 checkout scm
             }
         }
 
-        // 2. SETUP
         stage('Setup') {
             steps {
                 bat 'node --version'
@@ -26,16 +30,19 @@ pipeline {
                 bat 'docker --version'
 
                 dir('Client') {
-                    bat 'npm ci'
+                    retry(3) {
+                        bat 'npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000'
+                    }
                 }
 
                 dir('Server') {
-                    bat 'npm ci'
+                    retry(3) {
+                        bat 'npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000'
+                    }
                 }
             }
         }
 
-        // 3. BUILD
         stage('Build') {
             steps {
                 dir('Client') {
@@ -49,25 +56,23 @@ pipeline {
             }
         }
 
-        // 4. RUN DOCKER
         stage('Run Docker') {
             steps {
                 script {
-                    def version = env.TAG_NAME ?: 'latest'
+                    env.IMAGE_TAG = env.TAG_NAME?.trim() ? env.TAG_NAME : 'latest'
 
-                    bat 'docker build -t ' + CLIENT_IMAGE + ':' + version + ' ./Client'
-                    bat 'docker build -t ' + SERVER_IMAGE + ':' + version + ' ./Server'
+                    bat 'docker rm -f mern-server-test 2>NUL || exit /b 0'
+                    bat 'docker rm -f mern-client-test 2>NUL || exit /b 0'
 
-                    bat 'docker rm -f ' + SERVER_CONTAINER + ' 2>NUL || exit /b 0'
-                    bat 'docker rm -f ' + CLIENT_CONTAINER + ' 2>NUL || exit /b 0'
+                    bat 'docker build -t mern-client:%IMAGE_TAG% ./Client'
+                    bat 'docker build -t mern-server:%IMAGE_TAG% ./Server'
 
-                    bat 'docker run -d --name ' + SERVER_CONTAINER + ' -p 9000:9000 ' + SERVER_IMAGE + ':' + version
-                    bat 'docker run -d --name ' + CLIENT_CONTAINER + ' -p 3000:3000 ' + CLIENT_IMAGE + ':' + version
+                    bat 'docker run -d --name mern-server-test -p 9000:9000 mern-server:%IMAGE_TAG%'
+                    bat 'docker run -d --name mern-client-test -p 3000:3000 mern-client:%IMAGE_TAG%'
                 }
             }
         }
 
-        // 5. SMOKE TEST
         stage('Smoke Test') {
             steps {
                 bat '''
@@ -80,7 +85,30 @@ pipeline {
             }
         }
 
-        // 6. ARCHIVE
+        stage('Push DockerHub') {
+            steps {
+                script {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'jenkins',
+                            usernameVariable: 'DOCKER_USER',
+                            passwordVariable: 'DOCKER_TOKEN'
+                        )
+                    ]) {
+                        bat '''
+                        powershell -NoProfile -NonInteractive -Command "$env:DOCKER_TOKEN | docker login --username $env:DOCKER_USER --password-stdin; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+                        '''
+
+                        bat 'docker tag mern-client:%IMAGE_TAG% %DOCKER_USER%/mern-client:%IMAGE_TAG%'
+                        bat 'docker tag mern-server:%IMAGE_TAG% %DOCKER_USER%/mern-server:%IMAGE_TAG%'
+
+                        bat 'docker push %DOCKER_USER%/mern-client:%IMAGE_TAG%'
+                        bat 'docker push %DOCKER_USER%/mern-server:%IMAGE_TAG%'
+                    }
+                }
+            }
+        }
+
         stage('Archive') {
             steps {
                 archiveArtifacts artifacts: 'Client/dist/**', fingerprint: true
@@ -95,11 +123,11 @@ pipeline {
         }
 
         success {
-            echo 'CI/CD Pipeline completed successfully!'
+            echo 'Pipeline completed successfully!'
         }
 
         failure {
-            echo 'CI/CD Pipeline failed. Check Console Output.'
+            echo 'Pipeline failed! Check Console Output.'
         }
     }
 }
