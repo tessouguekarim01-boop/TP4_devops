@@ -86,6 +86,10 @@ pipeline {
         }
 
         stage('Push DockerHub') {
+            options {
+                timeout(time: 15, unit: 'MINUTES')
+            }
+
             steps {
                 script {
                     withCredentials([
@@ -102,8 +106,17 @@ pipeline {
                         bat 'docker tag mern-client:%IMAGE_TAG% %DOCKER_USER%/mern-client:%IMAGE_TAG%'
                         bat 'docker tag mern-server:%IMAGE_TAG% %DOCKER_USER%/mern-server:%IMAGE_TAG%'
 
-                        bat 'docker push %DOCKER_USER%/mern-client:%IMAGE_TAG%'
-                        bat 'docker push %DOCKER_USER%/mern-server:%IMAGE_TAG%'
+                        retry(3) {
+                            timeout(time: 10, unit: 'MINUTES') {
+                                bat 'docker push %DOCKER_USER%/mern-client:%IMAGE_TAG%'
+                            }
+                        }
+
+                        retry(3) {
+                            timeout(time: 10, unit: 'MINUTES') {
+                                bat 'docker push %DOCKER_USER%/mern-server:%IMAGE_TAG%'
+                            }
+                        }
                     }
                 }
             }
